@@ -1,0 +1,7 @@
+{
+  "name": "Dost - Your Safe Space",
+  "description": "A personal AI companion that speaks your language (Hinglish), listens to your thoughts, and supports you like a best friend.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
