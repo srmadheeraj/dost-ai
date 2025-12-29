@@ -3,34 +3,33 @@ import { GoogleGenAI, Chat, Modality, LiveServerMessage } from "@google/genai";
 import { SYSTEM_INSTRUCTION } from "../constants";
 
 export class DostService {
-  private ai: GoogleGenAI;
-  private chat: Chat | null = null;
+  constructor() {}
 
-  constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+  private createClient() {
+    // Guidelines require 'new GoogleGenAI({ apiKey: process.env.API_KEY })'
+    return new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
   initChat() {
-    this.chat = this.ai.chats.create({
+    const ai = this.createClient();
+    return ai.chats.create({
       model: 'gemini-3-flash-preview',
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
         temperature: 0.95,
       },
     });
-    return this.chat;
   }
 
   async *sendMessageStream(message: string) {
-    if (!this.chat) this.initChat();
-    
+    const chat = this.initChat();
     try {
-      const result = await this.chat!.sendMessageStream({ message });
+      const result = await chat.sendMessageStream({ message });
       for await (const chunk of result) {
         yield chunk.text;
       }
     } catch (error) {
-      console.error("Gemini Error:", error);
+      console.error("Gemini Chat Error:", error);
       throw error;
     }
   }
@@ -43,10 +42,10 @@ export class DostService {
     onTranscription?: (text: string, isUser: boolean) => void;
     onTurnComplete?: () => void;
   }) {
-    // Re-instantiate on every call to ensure the latest API key is used
-    const voiceAi = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
+    // Create client right before connect to get latest key
+    const ai = this.createClient();
     
-    return voiceAi.live.connect({
+    return ai.live.connect({
       model: 'gemini-2.5-flash-native-audio-preview-09-2025',
       config: {
         responseModalities: [Modality.AUDIO],
@@ -60,7 +59,7 @@ export class DostService {
       callbacks: {
         onopen: () => console.debug("Dost session live"),
         onmessage: (message: LiveServerMessage) => {
-          if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
+          if (message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
             callbacks.onAudioChunk(message.serverContent.modelTurn.parts[0].inlineData.data);
           }
           if (message.serverContent?.interrupted) {
@@ -76,8 +75,14 @@ export class DostService {
             callbacks.onTurnComplete?.();
           }
         },
-        onclose: callbacks.onClose,
-        onerror: callbacks.onError,
+        onclose: (e) => {
+          console.debug("Dost session closed", e);
+          callbacks.onClose();
+        },
+        onerror: (e) => {
+          console.error("Dost session error", e);
+          callbacks.onError(e);
+        },
       }
     });
   }
@@ -119,10 +124,10 @@ export function createPcmBlob(data: Float32Array): { data: string; mimeType: str
     int16[i] = data[i] * 32768;
   }
   
-  // Custom manual base64 encoding to follow guidelines
   let binary = '';
   const bytes = new Uint8Array(int16.buffer);
-  for (let i = 0; i < bytes.byteLength; i++) {
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   

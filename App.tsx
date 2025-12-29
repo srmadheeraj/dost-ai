@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { dostService, decodeBase64, decodeAudioData, createPcmBlob } from './services/geminiService';
 import { MOODS } from './constants';
@@ -6,6 +7,7 @@ import { MoodSelector } from './components/MoodSelector';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  const [errorMessage, setErrorMessage] = useState<string>('');
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [transcription, setTranscription] = useState<{ text: string; isUser: boolean; timestamp: Date }[]>([]);
@@ -73,11 +75,44 @@ const App: React.FC = () => {
 
     setStatus('idle');
     setIsSpeaking(false);
+    nextStartTime.current = 0;
+  };
+
+  const handleConnectionError = (err: any) => {
+    console.error("Dost Connection Error:", err);
+    let msg = err?.message || String(err);
+    
+    // Check for specific API Key / Project errors
+    if (msg.includes("Requested entity was not found") || msg.includes("API key")) {
+      msg = "API Key error. Please click the button below to select a valid key.";
+      if ((window as any).aistudio) {
+        (window as any).aistudio.openSelectKey();
+      }
+    } else if (msg.includes("Network error") || msg.includes("Failed to fetch")) {
+      msg = "Network error. Please check your internet or API key settings.";
+    }
+
+    setErrorMessage(msg);
+    setStatus('error');
+    endCall();
   };
 
   const startCall = async () => {
     setStatus('connecting');
+    setErrorMessage('');
+
+    // Handle key selection requirement for certain environments (like AI Studio/Vercel previews)
+    const aistudio = (window as any).aistudio;
+    if (aistudio) {
+      const hasKey = await aistudio.hasSelectedApiKey();
+      if (!hasKey) {
+        await aistudio.openSelectKey();
+        // Assume success after trigger as per guidelines
+      }
+    }
+
     try {
+      // 1. Microphone Access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       
@@ -85,6 +120,7 @@ const App: React.FC = () => {
       audioContextIn.current = new AudioContextClass({ sampleRate: 16000 });
       audioContextOut.current = new AudioContextClass({ sampleRate: 24000 });
 
+      // 2. Connect to Gemini Live
       const session = dostService.connectVoice({
         onAudioChunk: async (base64) => {
           if (!audioContextOut.current || audioContextOut.current.state === 'closed') return;
@@ -94,16 +130,19 @@ const App: React.FC = () => {
             const source = audioContextOut.current.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(audioContextOut.current.destination);
+            
+            // Sync playback timing
             nextStartTime.current = Math.max(nextStartTime.current, audioContextOut.current.currentTime);
             source.start(nextStartTime.current);
             nextStartTime.current += audioBuffer.duration;
+            
             sources.current.add(source);
             source.onended = () => {
               sources.current.delete(source);
               if (sources.current.size === 0) setIsSpeaking(false);
             };
           } catch (e) {
-            console.error("Playback error:", e);
+            console.error("Audio playback error:", e);
           }
         },
         onInterrupted: () => {
@@ -118,16 +157,14 @@ const App: React.FC = () => {
         onClose: () => {
           if (status !== 'idle') endCall();
         },
-        onError: (e) => {
-          console.error("Connection error:", e);
-          setStatus('error');
-        }
+        onError: handleConnectionError
       });
 
       sessionPromise.current = session;
-      await session;
+      await session; // Wait for session to be fully resolved
       setStatus('connected');
 
+      // 3. Audio Processing Node
       const micSource = audioContextIn.current.createMediaStreamSource(stream);
       const processor = audioContextIn.current.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
@@ -136,17 +173,22 @@ const App: React.FC = () => {
         if (!sessionPromise.current) return;
         const inputData = e.inputBuffer.getChannelData(0);
         const pcmBlob = createPcmBlob(inputData);
+        
+        // Critical: Send input only after session resolves
         sessionPromise.current.then(s => {
-          try { s.sendRealtimeInput({ media: pcmBlob }); } catch (err) {}
+          try { 
+            s.sendRealtimeInput({ media: pcmBlob }); 
+          } catch (err) {
+            console.error("Failed to send audio input:", err);
+          }
         });
       };
+      
       micSource.connect(processor);
       processor.connect(audioContextIn.current.destination);
 
     } catch (err) {
-      console.error("Startup error:", err);
-      setStatus('error');
-      endCall();
+      handleConnectionError(err);
     }
   };
 
@@ -183,7 +225,7 @@ const App: React.FC = () => {
             {transcription.length === 0 ? (
               <div className="h-full flex items-center justify-center text-center opacity-30 px-6">
                 <p className="text-sm italic font-medium leading-relaxed">
-                  "No memories yet. Let's talk, yaar."
+                  "Koi memory nahi hai abhi tak. Kuch bolo toh sahi, yaar."
                 </p>
               </div>
             ) : (
@@ -202,7 +244,7 @@ const App: React.FC = () => {
             )}
           </div>
           <div className="pt-6 border-t border-white/5 opacity-20 text-center">
-             <p className="text-[8px] uppercase tracking-widest font-black">Private & Encrypted</p>
+             <p className="text-[8px] uppercase tracking-widest font-black">Private & Secure</p>
           </div>
         </div>
       </aside>
@@ -234,10 +276,6 @@ const App: React.FC = () => {
           ref={mainScrollRef}
           className="flex-1 overflow-y-auto relative no-scrollbar"
         >
-          {/* 
-            Using min-h-full + flex to center content when it's small, 
-            but naturally scroll when it exceeds the viewport.
-          */}
           <div className="min-h-full w-full flex flex-col items-center justify-start sm:justify-center pt-4 pb-20 px-6 lg:px-20 relative">
             
             {status === 'idle' || status === 'error' ? (
@@ -253,31 +291,33 @@ const App: React.FC = () => {
                 
                 <div className="space-y-4 px-2">
                   <h2 className="serif text-3xl lg:text-6xl font-bold text-white tracking-tight leading-tight">
-                    {status === 'error' ? 'Oye, connection break ho gaya' : 'Kuch kehna hai?'}
+                    {status === 'error' ? 'Oops, check connection' : 'Baat karein?'}
                   </h2>
-                  <p className="text-gray-400 text-sm lg:text-lg max-w-md mx-auto italic font-medium opacity-70 leading-relaxed">
+                  <p className="text-gray-400 text-sm lg:text-lg max-w-md mx-auto italic font-medium opacity-70 leading-relaxed px-4">
                     {status === 'error' 
-                      ? 'Network issue lag raha hai. Try again?'
+                      ? errorMessage
                       : 'Main yahin hoon. Share what’s on your mind—tension mat le, main sab samajh lunga.'}
                   </p>
                 </div>
 
-                <div className="w-full flex flex-col items-center">
-                  <p className="text-[10px] uppercase tracking-[0.3em] font-black text-amber-500/40 mb-5">Current Mood</p>
-                  <MoodSelector onSelect={setCurrentMood} selectedMood={currentMood} />
-                </div>
+                {(status === 'idle' || !errorMessage.includes('API key')) && (
+                  <div className="w-full flex flex-col items-center">
+                    <p className="text-[10px] uppercase tracking-[0.3em] font-black text-amber-500/40 mb-5">Current Mood</p>
+                    <MoodSelector onSelect={setCurrentMood} selectedMood={currentMood} />
+                  </div>
+                )}
 
-                <div className="w-full max-w-sm">
+                <div className="w-full max-w-sm px-6">
                   <button 
                     onClick={startCall}
                     className="w-full bg-white text-black hover:bg-amber-500 hover:scale-[1.02] transition-all duration-300 py-5 lg:py-6 rounded-2xl font-black text-[11px] lg:text-xs uppercase tracking-[0.4em] shadow-[0_20px_40px_rgba(0,0,0,0.4)] active:scale-95 flex items-center justify-center gap-3"
                   >
-                    {status === 'error' ? 'Reconnect' : 'Start Talking'}
+                    {status === 'error' ? (errorMessage.includes('key') ? 'Select API Key' : 'Retry Connection') : 'Enter Sanctuary'}
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4 lg:w-5 lg:h-5">
                       <path fillRule="evenodd" d="M16.72 7.72a.75.75 0 0 1 1.06 0l3.75 3.75a.75.75 0 0 1 0 1.06l-3.75 3.75a.75.75 0 1 1-1.06-1.06l2.47-2.47H3a.75.75 0 0 1 0-1.5h16.19l-2.47-2.47a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
                     </svg>
                   </button>
-                  <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-6 font-medium">Safe • Private • Hinglish</p>
+                  <p className="text-[8px] text-gray-500 uppercase tracking-widest mt-6 font-medium">Click to start voice interaction</p>
                 </div>
               </div>
             ) : (
@@ -308,19 +348,19 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="text-center space-y-4">
+                <div className="text-center space-y-4 px-6">
                   <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/5 border border-white/10">
                      <div className={`w-1.5 h-1.5 rounded-full ${status === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-amber-400'}`}></div>
                      <span className="text-[9px] uppercase tracking-[0.3em] font-black text-gray-400">
-                        Friend Online
+                        Sanctuary Active
                      </span>
                   </div>
-                  <h2 className="serif text-3xl lg:text-6xl font-bold text-white tracking-tight">
+                  <h2 className="serif text-2xl lg:text-6xl font-bold text-white tracking-tight">
                     {status === 'connecting' ? 'Connecting...' : isSpeaking ? 'Listening to Dost...' : 'Bolte raho, main sun raha hoon'}
                   </h2>
                 </div>
 
-                <div className="w-full max-w-xs">
+                <div className="w-full max-w-xs px-6">
                    <button 
                       onClick={endCall}
                       className="w-full bg-white/5 hover:bg-red-500/10 hover:text-red-500 hover:border-red-500/30 text-gray-500 py-5 lg:py-6 rounded-2xl font-black text-[9px] lg:text-[10px] uppercase tracking-[0.4em] border border-white/10 transition-all duration-300 active:scale-95 flex items-center justify-center gap-3 group"
@@ -338,7 +378,7 @@ const App: React.FC = () => {
 
         {/* Global Footer info */}
         <footer className="shrink-0 px-8 py-6 flex justify-between items-center opacity-20 safe-pb">
-          <p className="text-[8px] uppercase tracking-[0.4em] font-black">Digital Sanctuary</p>
+          <p className="text-[8px] uppercase tracking-[0.4em] font-black">Dost Companion</p>
           <div className="flex gap-6">
              <span className="text-[8px] uppercase tracking-widest font-black italic">Hinglish Mode</span>
              <span className="text-[8px] uppercase tracking-widest font-black">Encrypted</span>
